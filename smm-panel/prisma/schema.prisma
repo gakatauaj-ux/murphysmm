@@ -1,0 +1,87 @@
+// Phase 1 schema. Balance/User auth fields are included now (nullable-safe
+// defaults) so Phase 2 doesn't require a destructive migration — but the
+// Phase 1 order flow does NOT require a logged-in user; orderedBy is
+// optional and can be a session/guest identifier for the MVP demo.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Category {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  services  Service[]
+  createdAt DateTime  @default(now())
+}
+
+model Service {
+  id                 String   @id @default(cuid())
+  providerServiceId  String   @unique // maps to provider's "service" id
+  providerId         String   @default("smmcost") // which upstream provider — enables multi-provider later
+  name               String // provider's original name
+  displayName        String? // admin-editable name shown to customer; falls back to `name`
+  description        String?
+  categoryId         String
+  category           Category @relation(fields: [categoryId], references: [id])
+  type               String
+  supplierRate       Float // provider's price per 1000, as-is from provider
+  markupPercent      Float    @default(30) // simple default markup; can be overridden by markupFixed
+  markupFixed        Float? // if set, takes precedence over markupPercent
+  min                Int
+  max                Int
+  refillSupported    Boolean  @default(false)
+  cancelSupported    Boolean  @default(false)
+  requiredParams     Json     @default("[]") // e.g. ["link","quantity"] — drives the dynamic order form
+  active             Boolean  @default(true) // admin can hide without deleting
+  lastSyncedAt       DateTime @default(now())
+  orders             Order[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  PARTIAL
+  PROCESSING
+  CANCELED
+  ERROR
+}
+
+// Serverless functions are stateless between invocations, so the bot's
+// "where are we in this conversation" state has to live somewhere durable
+// instead of in memory. One row per Telegram chat.
+model BotSession {
+  chatId    String   @id // Telegram chat id, as string
+  step      String   @default("IDLE") // IDLE | AWAITING_QUANTITY | AWAITING_LINK | CONFIRM
+  data      Json     @default("{}") // whatever the current step needs (serviceId, quantity, link)
+  updatedAt DateTime @updatedAt
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  serviceId        String
+  service          Service     @relation(fields: [serviceId], references: [id])
+  providerOrderId  String? // null until provider accepts it
+  link             String?
+  quantity         Int?
+  extraParams      Json        @default("{}") // any of runs/interval/comments/usernames/... actually used
+  customerPrice    Float // what we charged/would charge, at order time
+  supplierPrice    Float? // provider charge if/when known — never shown to customer
+  status           OrderStatus @default(PENDING)
+  orderedBy        String? // Phase 1: free-form session id; Phase 2: real userId (FK added then)
+  idempotencyKey   String      @unique // prevents duplicate order creation on retry/double-click
+  lastCheckedAt    DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([status])
+  @@index([providerOrderId])
+}
